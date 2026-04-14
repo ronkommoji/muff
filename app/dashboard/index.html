@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="layout">
+    <header>
+      <h1>Agent Dashboard</h1>
+      <span class="status-dot" id="status-dot" title="Checking..."></span>
+      <span id="header-cost" style="margin-left:auto;font-size:12px;color:var(--muted)"></span>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="messages">Messages</button>
+      <button class="tab-btn" data-tab="memories">Memory</button>
+      <button class="tab-btn" data-tab="tools">Tools</button>
+      <button class="tab-btn" data-tab="toolcalls">Tool Calls</button>
+      <button class="tab-btn" data-tab="usage">Usage &amp; Cost</button>
+    </nav>
+
+    <!-- ── Messages ──────────────────────────────────────────────── -->
+    <section id="tab-messages" class="tab-panel active">
+      <div class="panel-header">
+        <h2>Conversation History</h2>
+        <button onclick="loadMessages()">Refresh</button>
+      </div>
+      <div id="messages-list" class="messages-list">
+        <p class="loading">Loading...</p>
+      </div>
+    </section>
+
+    <!-- ── Memories ──────────────────────────────────────────────── -->
+    <section id="tab-memories" class="tab-panel">
+      <div class="panel-header">
+        <h2>Memory</h2>
+        <div class="search-row">
+          <input id="memory-search" type="text" placeholder="Search memories..." />
+          <button onclick="searchMemories()">Search</button>
+          <button onclick="loadMemories()">Browse All</button>
+        </div>
+      </div>
+      <div id="memories-list" class="card-list">
+        <p class="loading">Enter a query or click Browse All.</p>
+      </div>
+    </section>
+
+    <!-- ── Tools ─────────────────────────────────────────────────── -->
+    <section id="tab-tools" class="tab-panel">
+      <div class="panel-header">
+        <h2>Connect Tools</h2>
+        <div class="search-row">
+          <input id="apps-search" type="text" placeholder="Search apps..." oninput="filterApps()" />
+          <select id="apps-category" onchange="filterApps()">
+            <option value="">All categories</option>
+          </select>
+          <button onclick="loadApps()">Refresh</button>
+        </div>
+      </div>
+      <div id="apps-summary" class="apps-summary"></div>
+      <div id="apps-grid" class="apps-grid">
+        <p class="loading">Loading apps...</p>
+      </div>
+      <div id="oauth-toast" class="oauth-toast hidden"></div>
+    </section>
+
+    <!-- ── Usage & Cost ──────────────────────────────────────────── -->
+    <section id="tab-usage" class="tab-panel">
+      <div class="panel-header">
+        <h2>Usage &amp; Cost</h2>
+        <button onclick="loadUsage()">Refresh</button>
+      </div>
+      <div id="usage-stats" class="usage-stats"></div>
+      <div class="panel-header" style="margin-top:1.5rem">
+        <h2>Per-message log</h2>
+      </div>
+      <div id="usage-log" class="card-list">
+        <p class="loading">Loading...</p>
+      </div>
+    </section>
+
+    <!-- ── Tool Calls ─────────────────────────────────────────────── -->
+    <section id="tab-toolcalls" class="tab-panel">
+      <div class="panel-header">
+        <h2>Tool Call Log</h2>
+        <button onclick="loadToolCalls()">Refresh</button>
+      </div>
+      <div id="toolcalls-list" class="card-list">
+        <p class="loading">Loading...</p>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
