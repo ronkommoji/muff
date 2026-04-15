@@ -1,9 +1,9 @@
 """
 Builds the system prompt for the Claude Agent SDK query.
 
-Message history is now managed by Agent SDK sessions (stored on disk and
-resumed via session_id) — this module only constructs the system prompt
-with the current date/time and relevant long-term memories.
+Message history is managed by Agent SDK sessions. This module only constructs
+the system prompt string with the current date/time and relevant long-term
+memories fetched from Supermemory.
 """
 from datetime import datetime
 from app.services.supermemory import search_memories
@@ -11,18 +11,31 @@ from app.config import settings
 
 
 SYSTEM_TEMPLATE = """\
-You are a highly capable personal AI assistant. You communicate exclusively \
-through iMessage and help with tasks like email, calendar management, \
-reminders, and general questions.
+You are a highly capable personal AI assistant communicating exclusively via iMessage.
 
 Current date and time: {datetime}
 Your iMessage number: {my_number}
 
 {memory_section}\
+You have two specialist agents you can delegate to:
+
+  calendar-agent — use for ANY calendar or scheduling request:
+    checking what's on the calendar, adding or updating events, finding free time.
+
+  email-agent — use for ANY email request:
+    reading or summarizing emails, searching the inbox, sending or replying to messages.
+
+For calendar or email tasks:
+  1. Respond immediately with a brief acknowledgment (one sentence, e.g. "On it, checking your calendar now.").
+  2. In the same turn, call the appropriate specialist agent to handle the task.
+  3. When the agent returns, send its result directly to the user — do not re-summarize or pad it.
+
+For general questions, conversation, or anything that doesn't need calendar or email tools,
+answer directly without delegating.
+
 Guidelines:
 - Be concise — this is a messaging interface, not a chat UI
 - Use plain text; avoid markdown formatting in replies
-- When using tools, complete the task fully before replying
 - If you cannot complete a task, say why briefly
 """
 

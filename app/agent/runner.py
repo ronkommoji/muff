@@ -2,12 +2,32 @@
 Top-level agent orchestration using the Claude Agent SDK.
 
 run_agent() is the single entry point called by the webhook handler.
-It coordinates: system prompt + memory building, session resumption,
-Agent SDK query execution (tool loop handled automatically via MCP),
-reply sending, DB persistence, usage logging, and async memory extraction.
+
+Architecture:
+  - Parent agent: handles routing and immediate acknowledgments.
+    It has only the Agent tool — it delegates calendar and email work
+    to specialist subagents rather than calling tools directly.
+  - calendar-agent subagent: scoped to Composio Calendar MCP tools + calendar skill.
+  - email-agent subagent: scoped to Composio Gmail MCP tools + email skill.
+
+ACK streaming:
+  When the parent delegates to a subagent, its first turn contains both an
+  acknowledgment sentence and a tool_use block. We intercept that text and send
+  it to the user immediately, so they get near-instant feedback while the
+  subagent does the actual work. The final ResultMessage.result is sent as
+  the complete reply.
 """
 import asyncio
-from claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage
+from pathlib import Path
+from claude_agent_sdk import (
+    query,
+    ClaudeAgentOptions,
+    AgentDefinition,
+    ResultMessage,
+    AssistantMessage,
+    TextBlock,
+    ToolUseBlock,
+)
 from app.services.sendblue import SendbluePayload, send_message
 from app.services.supermemory import add_memory
 from app.agent.context import build_system_prompt
@@ -18,6 +38,9 @@ from app.db.database import (
 from app.services.composio import get_mcp_config
 from app.config import settings
 from anthropic import Anthropic
+
+# Project root — Agent SDK uses this to find .claude/skills/
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 _haiku_client = Anthropic(api_key=settings.anthropic_api_key)
@@ -38,6 +61,43 @@ User message: {user_msg}
 Assistant reply: {assistant_reply}
 """
 
+# ── Subagent definitions ──────────────────────────────────────────────────────
+
+CALENDAR_AGENT = AgentDefinition(
+    description=(
+        "Handles ALL Google Calendar operations: checking what events are on the calendar "
+        "for any date or date range, creating or scheduling meetings and events, finding "
+        "free time slots, updating event details, and canceling events. "
+        "Use this agent for any request that involves the calendar."
+    ),
+    prompt=(
+        "You are a Google Calendar specialist. Complete the calendar task using your tools "
+        "and return a concise plain-text summary suitable for iMessage. "
+        "Do not use markdown. Keep your response to 1–3 lines unless a longer list is needed."
+    ),
+    tools=["mcp__composio-calendar__*"],
+    model="sonnet",
+    skills=["calendar"],
+)
+
+EMAIL_AGENT = AgentDefinition(
+    description=(
+        "Handles ALL Gmail operations: reading and summarizing emails, searching the inbox, "
+        "sending new emails, drafting and sending replies, and checking for unread messages. "
+        "Use this agent for any request that involves email."
+    ),
+    prompt=(
+        "You are a Gmail specialist. Complete the email task using your tools "
+        "and return a concise plain-text summary suitable for iMessage. "
+        "Do not use markdown. Keep your response brief — sender, subject, and key point per email."
+    ),
+    tools=["mcp__composio-gmail__*"],
+    model="sonnet",
+    skills=["email"],
+)
+
+
+# ── Memory extraction ─────────────────────────────────────────────────────────
 
 async def maybe_save_memory(user_msg: str, assistant_reply: str, parent_message_id: int) -> None:
     """
@@ -81,16 +141,18 @@ async def maybe_save_memory(user_msg: str, assistant_reply: str, parent_message_
         print(f"[memory] Error saving memory: {e}")
 
 
+# ── Main pipeline ─────────────────────────────────────────────────────────────
+
 async def run_agent(payload: SendbluePayload) -> None:
     """
     Full agent pipeline for a single incoming iMessage.
 
     Flow:
       1. Validate + deduplicate, insert user message to DB
-      2. Build system prompt (with relevant memories injected)
+      2. Build system prompt with relevant memories
       3. Look up Agent SDK session_id for this user (None = new session)
-      4. Run query() — Agent SDK handles tool loop via Composio MCP automatically
-      5. Capture ResultMessage: save session_id, log usage, send reply
+      4. Stream query() — intercept first ACK text and send immediately if parent delegates
+      5. On ResultMessage: save session_id, log usage, send final reply
       6. Persist assistant reply to DB, fire background memory extraction
     """
     if payload.is_outbound:
@@ -126,15 +188,45 @@ async def run_agent(payload: SendbluePayload) -> None:
             system_prompt=system_prompt,
             model="sonnet",
             resume=session_id,
-            tools=[],
+            # Parent only has the Agent tool — it delegates, never calls MCP tools directly
+            tools=["Agent"],
+            # MCP servers are available to subagents (tools= in AgentDefinition scopes them)
             mcp_servers=get_mcp_config(),
-            allowed_tools=["mcp__composio-calendar__*", "mcp__composio-gmail__*"],
-            max_turns=10,
+            allowed_tools=["Agent"],
+            agents={
+                "calendar-agent": CALENDAR_AGENT,
+                "email-agent": EMAIL_AGENT,
+            },
+            # Load project-level skills from .claude/skills/
+            cwd=str(PROJECT_ROOT),
+            setting_sources=["project"],
+            max_turns=5,
             max_budget_usd=0.50,
         )
 
+        ack_sent = False
         reply = None
+
         async for message in query(prompt=payload.content, options=options):
+
+            # Intercept the parent's first turn for an immediate ACK.
+            # Pattern: parent emits acknowledgment text + ToolUseBlock(name="Agent") in one turn.
+            # We send the text immediately so the user knows we're on it.
+            if isinstance(message, AssistantMessage) and not ack_sent:
+                blocks = message.content or []
+                has_delegation = any(
+                    isinstance(b, ToolUseBlock) and b.name == "Agent"
+                    for b in blocks
+                )
+                first_text = next(
+                    (b.text.strip() for b in blocks if isinstance(b, TextBlock) and b.text.strip()),
+                    None,
+                )
+                if first_text and has_delegation:
+                    await send_message(to=payload.from_number, content=first_text)
+                    print(f"[agent] ACK sent: '{first_text}'")
+                    ack_sent = True
+
             if isinstance(message, ResultMessage):
                 save_session_id(payload.from_number, message.session_id)
 
