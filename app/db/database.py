@@ -173,6 +173,151 @@ def get_recent_tool_calls(limit: int = 50) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ── Log helpers ───────────────────────────────────────────────────────────────
+
+def insert_log(
+    level: str,
+    event_type: str,
+    message: str,
+    metadata: dict | None = None,
+) -> None:
+    import json
+    db = get_db()
+    db.execute(
+        "INSERT INTO logs (level, event_type, message, metadata) VALUES (?, ?, ?, ?)",
+        (level, event_type, message, json.dumps(metadata) if metadata else None),
+    )
+    db.commit()
+
+
+def get_logs(
+    limit: int = 100,
+    offset: int = 0,
+    level: str | None = None,
+    event_type: str | None = None,
+) -> list[dict]:
+    db = get_db()
+    clauses: list[str] = []
+    params: list = []
+    if level:
+        clauses.append("level = ?")
+        params.append(level)
+    if event_type:
+        clauses.append("event_type = ?")
+        params.append(event_type)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.extend([limit, offset])
+    rows = db.execute(
+        f"SELECT id, level, event_type, message, metadata, created_at "
+        f"FROM logs {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_logs_total(level: str | None = None, event_type: str | None = None) -> int:
+    db = get_db()
+    clauses: list[str] = []
+    params: list = []
+    if level:
+        clauses.append("level = ?")
+        params.append(level)
+    if event_type:
+        clauses.append("event_type = ?")
+        params.append(event_type)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    row = db.execute(f"SELECT COUNT(*) FROM logs {where}", params).fetchone()
+    return row[0]
+
+
+def get_log_event_types() -> list[str]:
+    rows = get_db().execute(
+        "SELECT DISTINCT event_type FROM logs ORDER BY event_type"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+# ── DB viewer helpers ─────────────────────────────────────────────────────────
+
+def get_db_tables() -> list[str]:
+    rows = get_db().execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def _validate_table(table_name: str) -> None:
+    valid = {r[0] for r in get_db().execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if table_name not in valid:
+        raise ValueError(f"Unknown table: {table_name}")
+
+
+def get_table_schema(table_name: str) -> list[dict]:
+    _validate_table(table_name)
+    rows = get_db().execute(f"PRAGMA table_info({table_name})").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_table_rows(
+    table_name: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    _validate_table(table_name)
+    total = get_db().execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+    rows = get_db().execute(
+        f"SELECT * FROM {table_name} ORDER BY rowid DESC LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    return [dict(r) for r in rows], total
+
+
+# ── Analytics / chart helpers ─────────────────────────────────────────────────
+
+def get_daily_cost(days: int = 30) -> list[dict]:
+    rows = get_db().execute(
+        """SELECT date(created_at) as day,
+                  SUM(cost_usd) as cost,
+                  SUM(input_tokens) as input_tokens,
+                  SUM(output_tokens) as output_tokens
+           FROM usage
+           WHERE created_at >= date('now', ?)
+           GROUP BY day ORDER BY day ASC""",
+        (f"-{days} days",),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_messages_per_day(days: int = 30) -> list[dict]:
+    rows = get_db().execute(
+        """SELECT date(created_at) as day, COUNT(*) as count
+           FROM messages
+           WHERE created_at >= date('now', ?)
+           GROUP BY day ORDER BY day ASC""",
+        (f"-{days} days",),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_tool_usage_frequency(limit: int = 15) -> list[dict]:
+    rows = get_db().execute(
+        """SELECT tool_name, COUNT(*) as count
+           FROM tool_calls
+           GROUP BY tool_name ORDER BY count DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_messages_count_and_range() -> dict:
+    row = get_db().execute(
+        "SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM messages"
+    ).fetchone()
+    return {"count": row[0], "min_date": row[1], "max_date": row[2]}
+
+
 # ── Session helpers ───────────────────────────────────────────────────────────
 
 def get_session_id(phone_number: str) -> str | None:

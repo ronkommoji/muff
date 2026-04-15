@@ -41,3 +41,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id   TEXT NOT NULL,
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    level       TEXT NOT NULL CHECK(level IN ('info', 'warning', 'error')),
+    event_type  TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    metadata    TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level, created_at DESC);

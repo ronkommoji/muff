@@ -14,6 +14,7 @@ from app.agent.context import build_system_prompt
 from app.db.database import (
     message_exists, insert_message, insert_usage,
     get_session_id, save_session_id,
+    insert_log,
 )
 from app.services.composio import get_mcp_config
 from app.config import settings
@@ -76,9 +77,12 @@ async def maybe_save_memory(user_msg: str, assistant_reply: str, parent_message_
         for fact in facts:
             if fact and fact != "NOTHING":
                 await add_memory(fact, metadata={"source": "conversation"})
-                print(f"[memory] Saved: {fact}")
+                insert_log("info", "memory.saved", "Saved memory fact", {"fact": fact})
     except Exception as e:
-        print(f"[memory] Error saving memory: {e}")
+        try:
+            insert_log("error", "memory.error", f"Error saving memory: {e}", {"error": str(e)})
+        except Exception:
+            pass
 
 
 async def run_agent(payload: SendbluePayload) -> None:
@@ -97,14 +101,14 @@ async def run_agent(payload: SendbluePayload) -> None:
         return
 
     if payload.from_number != settings.user_phone_number:
-        print(f"[agent] Ignoring message from unknown number: {payload.from_number}")
+        insert_log("warning", "agent.unauthorized", "Message from unknown number", {"from": payload.from_number})
         return
 
     if not payload.content.strip():
         return
 
     if payload.message_handle and message_exists(payload.message_handle):
-        print(f"[agent] Duplicate message_handle {payload.message_handle}, skipping")
+        insert_log("info", "agent.duplicate", "Duplicate message skipped", {"handle": payload.message_handle})
         return
 
     user_msg_id = insert_message(
@@ -116,7 +120,7 @@ async def run_agent(payload: SendbluePayload) -> None:
         service=payload.service,
     )
 
-    print(f"[agent] Processing: '{payload.content[:60]}...'")
+    insert_log("info", "agent.message_received", "Processing message", {"from": payload.from_number, "preview": payload.content[:60]})
 
     try:
         system_prompt = await build_system_prompt(payload.content)
@@ -150,18 +154,19 @@ async def run_agent(payload: SendbluePayload) -> None:
                         input_tokens=u.get("input_tokens", 0),
                         output_tokens=u.get("output_tokens", 0),
                     )
-                    print(
-                        f"[usage] cost=${message.total_cost_usd:.5f} "
-                        f"turns={message.num_turns} "
-                        f"in={u.get('input_tokens', 0)} out={u.get('output_tokens', 0)}"
-                    )
+                    insert_log("info", "usage.logged", "Usage recorded", {
+                        "cost_usd": round(message.total_cost_usd, 6),
+                        "turns": message.num_turns,
+                        "input_tokens": u.get("input_tokens", 0),
+                        "output_tokens": u.get("output_tokens", 0),
+                    })
 
                 if message.subtype == "success":
                     reply = message.result
 
         if reply:
             await send_message(to=payload.from_number, content=reply)
-            print(f"[agent] Sent reply: '{reply[:60]}...'")
+            insert_log("info", "agent.reply_sent", "Reply sent", {"to": payload.from_number, "preview": reply[:60]})
 
             insert_message(
                 message_handle=None,
@@ -180,7 +185,7 @@ async def run_agent(payload: SendbluePayload) -> None:
             )
 
     except Exception as e:
-        print(f"[agent] Error processing message: {e}")
+        insert_log("error", "agent.error", f"Error processing message: {e}", {"error": str(e), "from": payload.from_number})
         try:
             await send_message(
                 to=payload.from_number,
