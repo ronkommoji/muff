@@ -19,6 +19,7 @@ ACK streaming:
 """
 import asyncio
 from pathlib import Path
+from datetime import datetime
 from claude_agent_sdk import (
     query,
     ClaudeAgentOptions,
@@ -33,11 +34,15 @@ from app.services.supermemory import add_memory
 from app.agent.context import build_system_prompt
 from app.db.database import (
     message_exists, insert_message, insert_usage,
-    get_session_id, save_session_id,
+    get_active_session, save_session,
+    deactivate_current_session, list_past_sessions, set_active_session,
 )
 from app.services.composio import get_mcp_config
 from app.config import settings
 from anthropic import Anthropic
+
+# Sessions idle longer than this are auto-reset
+SESSION_IDLE_HOURS = 8
 
 # Project root — Agent SDK uses this to find .claude/skills/
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -169,6 +174,54 @@ async def run_agent(payload: SendbluePayload) -> None:
         print(f"[agent] Duplicate message_handle {payload.message_handle}, skipping")
         return
 
+    # ── Zero-token session commands ───────────────────────────────────────────
+    # Handled with pure string matching — no AI calls, no tokens consumed.
+    cmd = payload.content.strip().lower()
+
+    if cmd in ("reset", "new"):
+        deactivate_current_session(payload.from_number)
+        await send_message(
+            to=payload.from_number,
+            content="Done, starting fresh. Your saved memories still apply.",
+        )
+        return
+
+    if cmd in ("resume s", "sessions", "s"):
+        past = list_past_sessions(payload.from_number, limit=5)
+        if not past:
+            await send_message(
+                to=payload.from_number,
+                content="No past sessions to resume. You're already in your only session.",
+            )
+        else:
+            lines = ["Past sessions — reply with the number to resume:"]
+            for i, s in enumerate(past, 1):
+                date = s["updated_at"][:10]
+                preview = (s["preview"] or "no preview")[:50]
+                lines.append(f"{i}. {date} — {preview}")
+            await send_message(to=payload.from_number, content="\n".join(lines))
+        return
+
+    if cmd.startswith("resume ") and cmd[7:].strip().isdigit():
+        n = int(cmd[7:].strip())
+        past = list_past_sessions(payload.from_number, limit=5)
+        if 1 <= n <= len(past):
+            chosen = past[n - 1]
+            set_active_session(payload.from_number, chosen["session_id"])
+            date = chosen["updated_at"][:10]
+            await send_message(
+                to=payload.from_number,
+                content=f"Resumed your session from {date}. Pick up where you left off.",
+            )
+        else:
+            count = len(past)
+            await send_message(
+                to=payload.from_number,
+                content=f"Pick a number between 1 and {count}.",
+            )
+        return
+    # ─────────────────────────────────────────────────────────────────────────
+
     user_msg_id = insert_message(
         message_handle=payload.message_handle or None,
         from_number=payload.from_number,
@@ -182,7 +235,21 @@ async def run_agent(payload: SendbluePayload) -> None:
 
     try:
         system_prompt = await build_system_prompt(payload.content)
-        session_id = get_session_id(payload.from_number)
+
+        # Resolve session — auto-reset if idle too long
+        active = get_active_session(payload.from_number)
+        if active:
+            hours_idle = (
+                datetime.now() - datetime.fromisoformat(active["updated_at"])
+            ).total_seconds() / 3600
+            if hours_idle >= SESSION_IDLE_HOURS:
+                print(f"[session] Auto-reset after {hours_idle:.1f}h idle")
+                deactivate_current_session(payload.from_number)
+                session_id = None
+            else:
+                session_id = active["session_id"]
+        else:
+            session_id = None
 
         options = ClaudeAgentOptions(
             system_prompt=system_prompt,
@@ -228,7 +295,11 @@ async def run_agent(payload: SendbluePayload) -> None:
                     ack_sent = True
 
             if isinstance(message, ResultMessage):
-                save_session_id(payload.from_number, message.session_id)
+                save_session(
+                    payload.from_number,
+                    message.session_id,
+                    preview=payload.content[:60],
+                )
 
                 if message.usage:
                     u = message.usage
