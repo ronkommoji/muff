@@ -4,11 +4,10 @@ Top-level agent orchestration using the Claude Agent SDK.
 run_agent() is the single entry point called by the webhook handler.
 
 Architecture:
-  - Parent agent: handles routing and immediate acknowledgments.
-    It has only the Agent tool — it delegates calendar and email work
-    to specialist subagents rather than calling tools directly.
-  - calendar-agent subagent: scoped to Composio Calendar MCP tools + calendar skill.
-  - email-agent subagent: scoped to Composio Gmail MCP tools + email skill.
+  - Parent agent: routes and ACKs; uses the Agent tool to delegate.
+  - composio-agent: Gmail, Calendar, and other Composio MCP tools (WebSearch/WebFetch disallowed).
+  - research-agent: Claude Code built-in WebSearch + WebFetch only.
+  - coding-agent: placeholder (no tools yet).
 
 ACK streaming:
   When the parent delegates to a subagent, its first turn contains both an
@@ -18,6 +17,7 @@ ACK streaming:
   the complete reply.
 """
 import asyncio
+import json
 from pathlib import Path
 from datetime import datetime
 from claude_agent_sdk import (
@@ -32,7 +32,7 @@ from claude_agent_sdk import (
 from app.services.sendblue import SendbluePayload, send_message
 from app.services.supermemory import add_memory
 from app.agent.context import build_system_prompt
-from app.db.database import (
+from app.db.convex_client import (
     message_exists, insert_message, insert_usage,
     get_active_session, save_session,
     deactivate_current_session, list_past_sessions, set_active_session,
@@ -52,54 +52,93 @@ HAIKU_MODEL = "claude-haiku-4-5-20251001"
 _haiku_client = Anthropic(api_key=settings.anthropic_api_key)
 
 MEMORY_EXTRACTION_PROMPT = """\
-Given the following conversation exchange between a user and their AI assistant, \
-extract any facts, preferences, decisions, or outcomes that are worth remembering \
-long-term across future conversations.
+Given the following conversation exchange, extract personal facts about the USER \
+worth remembering long-term across future conversations.
 
-Rules:
-- Only extract durable, cross-session facts (e.g. preferences, personal details, \
-  commitments, outcomes of completed tasks)
-- Do NOT extract ephemeral logistics or things already tracked elsewhere
-- If nothing is worth saving, respond with exactly: NOTHING
-- Otherwise respond with one concise sentence per fact, one per line
+Output a JSON array (max 3 items) where each item has:
+  "fact"      - one concise, entity-centric sentence about the USER (e.g. "Ron likes basketball")
+  "is_static" - true for permanent traits that never change (legal name, hometown, \
+where they work/study, birth year, close relationships); \
+false for preferences, habits, opinions, or decisions that may evolve
+
+STRICT rules — violating these is worse than missing a fact:
+- NEVER extract calendar events, meetings, scheduled items, or anything from a calendar listing
+- NEVER extract email contents, email subjects, sender names, or anything from email results
+- NEVER extract results returned by any tool — those are task outputs, not personal facts
+- NEVER extract things that are one-time or date-specific (e.g. "has meeting on Tuesday")
+- ONLY extract facts the user directly stated about themselves or their preferences
+- If nothing clearly qualifies, output exactly: NOTHING
+
+Examples of what NOT to save:
+  "Ron has a meeting with Alex at 3pm" → skip (calendar event)
+  "Ron received an email from John" → skip (email result)
+  "Ron's calendar shows 5 events today" → skip (tool output)
+
+Examples of what TO save:
+  "Ron prefers morning meetings" → save (preference the user stated)
+  "Ron attends Georgia Tech" → save (personal fact the user stated)
 
 User message: {user_msg}
 Assistant reply: {assistant_reply}
 """
 
+# Truncate assistant reply fed to Haiku — tool results (calendar, email) can be
+# very long and confuse the model into extracting tool output as personal facts.
+_REPLY_TRUNCATE = 600
+
 # ── Subagent definitions ──────────────────────────────────────────────────────
 
-CALENDAR_AGENT = AgentDefinition(
+COMPOSIO_AGENT = AgentDefinition(
     description=(
-        "Handles ALL Google Calendar operations: checking what events are on the calendar "
-        "for any date or date range, creating or scheduling meetings and events, finding "
-        "free time slots, updating event details, and canceling events. "
-        "Use this agent for any request that involves the calendar."
+        "Handles ALL productivity tool operations: Google Calendar (checking events, "
+        "creating meetings, finding free time), Gmail (reading, searching, sending, "
+        "replying to emails), and any other connected Composio tools. "
+        "Use this agent for ANY request involving calendar, email, or connected apps."
     ),
     prompt=(
-        "You are a Google Calendar specialist. Complete the calendar task using your tools "
-        "and return a concise plain-text summary suitable for iMessage. "
-        "Do not use markdown. Keep your response to 1–3 lines unless a longer list is needed."
+        "You are a productivity tools specialist with access to Gmail, Google Calendar, "
+        "and other connected apps via Composio.\n\n"
+        "Workflow:\n"
+        "1. Use COMPOSIO_SEARCH_TOOLS to find the right tool for the task.\n"
+        "2. If a connection is needed, use COMPOSIO_MANAGE_CONNECTIONS.\n"
+        "3. Call the discovered tool to complete the request.\n"
+        "4. Return a concise plain-text summary suitable for iMessage.\n\n"
+        "Do not use markdown. Keep responses brief."
     ),
-    tools=["mcp__composio-calendar__*"],
     model="sonnet",
-    skills=["calendar"],
+    disallowedTools=["WebFetch", "WebSearch"],
 )
 
-EMAIL_AGENT = AgentDefinition(
+CODING_AGENT = AgentDefinition(
     description=(
-        "Handles ALL Gmail operations: reading and summarizing emails, searching the inbox, "
-        "sending new emails, drafting and sending replies, and checking for unread messages. "
-        "Use this agent for any request that involves email."
+        "Handles code-related tasks: writing code, debugging, explaining code, "
+        "code review, and technical questions. Use for any programming request."
     ),
     prompt=(
-        "You are a Gmail specialist. Complete the email task using your tools "
-        "and return a concise plain-text summary suitable for iMessage. "
-        "Do not use markdown. Keep your response brief — sender, subject, and key point per email."
+        "You are a coding specialist. Help with code tasks and return concise answers "
+        "suitable for iMessage. Use plain text, no markdown."
     ),
-    tools=["mcp__composio-gmail__*"],
+    tools=[],
     model="sonnet",
-    skills=["email"],
+)
+
+RESEARCH_AGENT = AgentDefinition(
+    description=(
+        "Handles research that needs the public web: current events, news, facts, "
+        "documentation, sports scores, and anything requiring up-to-date online "
+        "information. Use when the user asks to look something up or needs external sources."
+    ),
+    prompt=(
+        "You are a research specialist. Claude Code provides:\n"
+        "- WebSearch — find relevant pages and URLs for a query.\n"
+        "- WebFetch — read the full text from specific URLs (from the user or from WebSearch).\n"
+        "Use WebSearch first when you need to discover sources; use WebFetch to pull details from "
+        "the best URLs. You may repeat as needed.\n"
+        "Synthesize into a concise plain-text reply suitable for iMessage. No markdown. "
+        "If results are thin, say so briefly."
+    ),
+    tools=["WebSearch", "WebFetch"],
+    model="sonnet",
 )
 
 
@@ -111,16 +150,21 @@ async def maybe_save_memory(user_msg: str, assistant_reply: str, parent_message_
     and store them in Supermemory. Records token usage. Runs as a background task.
     """
     try:
+        truncated_reply = (
+            assistant_reply[:_REPLY_TRUNCATE] + "…[truncated]"
+            if len(assistant_reply) > _REPLY_TRUNCATE
+            else assistant_reply
+        )
         response = await asyncio.to_thread(
             _haiku_client.messages.create,
             model=HAIKU_MODEL,
-            max_tokens=512,
+            max_tokens=300,
             messages=[
                 {
                     "role": "user",
                     "content": MEMORY_EXTRACTION_PROMPT.format(
                         user_msg=user_msg,
-                        assistant_reply=assistant_reply,
+                        assistant_reply=truncated_reply,
                     ),
                 }
             ],
@@ -138,11 +182,28 @@ async def maybe_save_memory(user_msg: str, assistant_reply: str, parent_message_
         if text == "NOTHING":
             return
 
-        facts = [line.strip("- ").strip() for line in text.splitlines() if line.strip()]
-        for fact in facts:
-            if fact and fact != "NOTHING":
-                await add_memory(fact, metadata={"source": "conversation"})
-                insert_log("info", "memory.saved", "Saved memory fact", {"fact": fact})
+        # Parse structured JSON output; fall back to plain lines if malformed
+        try:
+            items = json.loads(text)
+            facts = [
+                (item["fact"], bool(item.get("is_static", False)))
+                for item in items
+                if isinstance(item, dict) and item.get("fact")
+            ]
+        except (json.JSONDecodeError, TypeError, KeyError):
+            facts = [
+                (line.strip("- ").strip(), False)
+                for line in text.splitlines()
+                if line.strip() and line.strip() != "NOTHING"
+            ]
+
+        # Hard cap — never store more than 3 facts per exchange
+        facts = facts[:3]
+
+        for fact, is_static in facts:
+            if fact:
+                await add_memory(fact, is_static=is_static, metadata={"source": "conversation"})
+                insert_log("info", "memory.saved", "Saved memory fact", {"fact": fact, "is_static": is_static})
     except Exception as e:
         try:
             insert_log("error", "memory.error", f"Error saving memory: {e}", {"error": str(e)})
@@ -238,6 +299,7 @@ async def run_agent(payload: SendbluePayload) -> None:
     insert_log("info", "agent.message_received", "Processing message", {"from": payload.from_number, "preview": payload.content[:60]})
 
     try:
+        insert_log("info", "agent.building_prompt", "Building system prompt")
         system_prompt = await build_system_prompt(payload.content)
 
         # Resolve session — auto-reset if idle too long
@@ -255,77 +317,105 @@ async def run_agent(payload: SendbluePayload) -> None:
         else:
             session_id = None
 
+        insert_log("info", "agent.querying", "Starting agent query", {"session_id": session_id})
+
+        mcp_config = get_mcp_config()
+        insert_log("info", "agent.mcp_config", f"MCP servers: {list(mcp_config.keys())}", {
+            "servers": {k: v.get("url", "")[:80] for k, v in mcp_config.items()},
+        })
+
         options = ClaudeAgentOptions(
             system_prompt=system_prompt,
             model="sonnet",
             resume=session_id,
-            # Parent only has the Agent tool — it delegates, never calls MCP tools directly
-            tools=["Agent"],
-            # MCP servers are available to subagents (tools= in AgentDefinition scopes them)
-            mcp_servers=get_mcp_config(),
-            allowed_tools=["Agent"],
+            # Built-ins: Agent (delegate) + Claude Code web tools for research-agent
+            tools=["Agent", "WebSearch", "WebFetch"],
+            allowed_tools=["Agent", "WebSearch", "WebFetch"],
+            mcp_servers=mcp_config,
+            permission_mode="bypassPermissions",
             agents={
-                "calendar-agent": CALENDAR_AGENT,
-                "email-agent": EMAIL_AGENT,
+                "composio-agent": COMPOSIO_AGENT,
+                "coding-agent": CODING_AGENT,
+                "research-agent": RESEARCH_AGENT,
             },
-            # Load project-level skills from .claude/skills/
             cwd=str(PROJECT_ROOT),
             setting_sources=["project"],
-            max_turns=5,
+            max_turns=8,
             max_budget_usd=0.50,
         )
 
         ack_sent = False
         reply = None
 
-        async for message in query(prompt=payload.content, options=options):
+        async def _run_query():
+            nonlocal ack_sent, reply
+            turn_count = 0
+            async for message in query(prompt=payload.content, options=options):
+                turn_count += 1
+                msg_type = type(message).__name__
+                print(f"[agent] Turn {turn_count}: {msg_type}", flush=True)
 
-            # Intercept the parent's first turn for an immediate ACK.
-            # Pattern: parent emits acknowledgment text + ToolUseBlock(name="Agent") in one turn.
-            # We send the text immediately so the user knows we're on it.
-            if isinstance(message, AssistantMessage) and not ack_sent:
-                blocks = message.content or []
-                has_delegation = any(
-                    isinstance(b, ToolUseBlock) and b.name == "Agent"
-                    for b in blocks
-                )
-                first_text = next(
-                    (b.text.strip() for b in blocks if isinstance(b, TextBlock) and b.text.strip()),
-                    None,
-                )
-                if first_text and has_delegation:
-                    await send_message(to=payload.from_number, content=first_text)
-                    print(f"[agent] ACK sent: '{first_text}'")
-                    ack_sent = True
+                if isinstance(message, AssistantMessage):
+                    blocks = message.content or []
+                    block_types = [type(b).__name__ for b in blocks]
+                    print(f"[agent]   blocks: {block_types}", flush=True)
+                    for b in blocks:
+                        if isinstance(b, TextBlock) and b.text.strip():
+                            print(f"[agent]   text: {b.text[:120]}", flush=True)
+                        if isinstance(b, ToolUseBlock):
+                            print(f"[agent]   tool_use: name={b.name} id={b.id}", flush=True)
+                            insert_log("info", "agent.tool_use", f"Tool call: {b.name}", {"tool": b.name, "id": b.id})
 
-            if isinstance(message, ResultMessage):
-                save_session(
-                    payload.from_number,
-                    message.session_id,
-                    preview=payload.content[:60],
-                )
-
-                if message.usage:
-                    u = message.usage
-                    model_name = (
-                        next(iter(message.model_usage), "claude-sonnet-4-6")
-                        if message.model_usage else "claude-sonnet-4-6"
+                if isinstance(message, AssistantMessage) and not ack_sent:
+                    blocks = message.content or []
+                    has_tool_use = any(isinstance(b, ToolUseBlock) for b in blocks)
+                    first_text = next(
+                        (b.text.strip() for b in blocks if isinstance(b, TextBlock) and b.text.strip()),
+                        None,
                     )
-                    insert_usage(
-                        message_id=user_msg_id,
-                        model=model_name,
-                        input_tokens=u.get("input_tokens", 0),
-                        output_tokens=u.get("output_tokens", 0),
-                    )
-                    insert_log("info", "usage.logged", "Usage recorded", {
-                        "cost_usd": round(message.total_cost_usd, 6),
-                        "turns": message.num_turns,
-                        "input_tokens": u.get("input_tokens", 0),
-                        "output_tokens": u.get("output_tokens", 0),
-                    })
+                    if first_text and has_tool_use:
+                        await send_message(to=payload.from_number, content=first_text)
+                        print(f"[agent] ACK sent: '{first_text}'")
+                        ack_sent = True
 
-                if message.subtype == "success":
-                    reply = message.result
+                if isinstance(message, ResultMessage):
+                    print(f"[agent]   result subtype={message.subtype}, turns={message.num_turns}", flush=True)
+                    if hasattr(message, 'result') and message.result:
+                        print(f"[agent]   result text: {message.result[:200]}", flush=True)
+                    save_session(
+                        payload.from_number,
+                        message.session_id,
+                        preview=payload.content[:60],
+                    )
+
+                    if message.usage:
+                        u = message.usage
+                        model_name = (
+                            next(iter(message.model_usage), "claude-sonnet-4-6")
+                            if message.model_usage else "claude-sonnet-4-6"
+                        )
+                        insert_usage(
+                            message_id=user_msg_id,
+                            model=model_name,
+                            input_tokens=u.get("input_tokens", 0),
+                            output_tokens=u.get("output_tokens", 0),
+                        )
+                        insert_log("info", "usage.logged", "Usage recorded", {
+                            "cost_usd": round(message.total_cost_usd, 6),
+                            "turns": message.num_turns,
+                            "input_tokens": u.get("input_tokens", 0),
+                            "output_tokens": u.get("output_tokens", 0),
+                        })
+
+                    if message.subtype == "success":
+                        reply = message.result
+
+        try:
+            await asyncio.wait_for(_run_query(), timeout=300)
+        except asyncio.TimeoutError:
+            insert_log("error", "agent.timeout", "Agent query timed out after 300s", {"from": payload.from_number})
+            await send_message(to=payload.from_number, content="Sorry, that took too long. Please try again.")
+            return
 
         if reply:
             await send_message(to=payload.from_number, content=reply)
@@ -348,7 +438,11 @@ async def run_agent(payload: SendbluePayload) -> None:
             )
 
     except Exception as e:
-        insert_log("error", "agent.error", f"Error processing message: {e}", {"error": str(e), "from": payload.from_number})
+        print(f"[agent] Unhandled error: {e}", flush=True)
+        try:
+            insert_log("error", "agent.error", f"Error processing message: {e}", {"error": str(e), "from": payload.from_number})
+        except Exception as log_err:
+            print(f"[agent] Failed to log error: {log_err}", flush=True)
         try:
             await send_message(
                 to=payload.from_number,

@@ -3,9 +3,6 @@ Composio service wrapper.
 
 Provides MCP server configuration for the Claude Agent SDK, plus dashboard
 helpers for app management and OAuth flows.
-
-Tool execution is handled automatically by the Agent SDK via MCP — no manual
-tool loop or AnthropicProvider needed.
 """
 import httpx
 from composio import Composio
@@ -15,55 +12,77 @@ _composio = Composio(api_key=settings.composio_api_key)
 
 COMPOSIO_API_BASE = "https://backend.composio.dev/api/v1"
 
-# Toolkits exposed to the agent via Composio MCP
 TOOLKITS = ["GMAIL", "GOOGLECALENDAR"]
+
+_mcp_config: dict | None = None
+
+
+def _log(level: str, event: str, message: str, metadata: dict | None = None) -> None:
+    print(f"[composio] {message}", flush=True)
+    try:
+        from app.db.convex_client import insert_log
+        insert_log(level, event, message, metadata)
+    except Exception:
+        pass
 
 
 def get_mcp_config() -> dict:
     """
-    Return MCP server configuration for the Claude Agent SDK.
+    Return MCP server config for the Claude Agent SDK.
 
-    Composio exposes per-toolkit MCP endpoints. We connect to Gmail and
-    Google Calendar separately so each can be loaded independently.
-
-    Verify exact URLs from:
-      composio.dev/toolkits/googlecalendar/framework/claude-agents-sdk
-      composio.dev/toolkits/gmail/framework/claude-agents-sdk
+    Uses session.mcp which gives a single URL with all connected tools.
+    Subagents scope their tools via the `tools` pattern in AgentDefinition.
     """
-    headers = {
-        "x-composio-api-key": settings.composio_api_key,
-        "x-composio-user-id": settings.composio_user_id,
-    }
-    return {
-        "composio-calendar": {
+    global _mcp_config
+    if _mcp_config is not None:
+        return _mcp_config
+
+    session = _composio.create(user_id=settings.composio_user_id)
+    url = session.mcp.url
+    headers = session.mcp.headers
+
+    _mcp_config = {
+        "composio": {
             "type": "http",
-            "url": "https://mcp.composio.dev/googlecalendar",
+            "url": url,
             "headers": headers,
         },
-        "composio-gmail": {
-            "type": "http",
-            "url": "https://mcp.composio.dev/gmail",
-            "headers": headers,
-        },
     }
+    _log("info", "composio.mcp_ready", f"MCP server ready: {url[:80]}...", {"url": url})
+    return _mcp_config
 
 
 def authorize_app(app: str, user_id: str | None = None) -> str:
-    """
-    Kick off OAuth for an app and return the redirect URL.
-    The user visits this URL to grant access.
-    """
     uid = user_id or settings.composio_user_id
     session = _composio.create(user_id=uid)
     connection_request = session.authorize(app.lower())
+    _log("info", "composio.oauth_started", f"OAuth started for {app}", {"app": app})
     return connection_request.redirect_url
 
 
+def test_connection(app_key: str, connection_id: str) -> dict:
+    headers = {"x-api-key": settings.composio_api_key}
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.get(
+                f"{COMPOSIO_API_BASE}/connectedAccounts/{connection_id}",
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        status = data.get("status", "unknown")
+        if status == "ACTIVE":
+            return {"ok": True, "status": status, "message": "Connection is active and healthy."}
+        elif status == "EXPIRED":
+            return {"ok": False, "status": status, "message": "Token expired. Reconnect to reauthorize."}
+        else:
+            return {"ok": False, "status": status, "message": f"Connection status: {status}. May need reauthorization."}
+    except Exception as e:
+        return {"ok": False, "status": "error", "message": str(e)}
+
+
 def list_all_apps() -> list[dict]:
-    """
-    Return all apps available in Composio with logo, description, and category.
-    Results are sorted: no_auth apps first (no connect needed), then alphabetically.
-    """
     with httpx.Client(timeout=30) as client:
         resp = client.get(
             f"{COMPOSIO_API_BASE}/apps",
@@ -91,10 +110,6 @@ def list_all_apps() -> list[dict]:
 
 
 def list_connected_apps(user_id: str | None = None) -> list[dict]:
-    """
-    Return connected accounts for this user by calling the Composio REST API
-    directly — more reliable than the SDK's session.toolkits() iteration.
-    """
     uid = user_id or settings.composio_user_id
     headers = {"x-api-key": settings.composio_api_key}
 

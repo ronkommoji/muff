@@ -61,3 +61,15 @@ CREATE TABLE IF NOT EXISTS logs (
 
 CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS crons (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    prompt      TEXT NOT NULL,
+    hour        INTEGER NOT NULL DEFAULT 8,
+    minute      INTEGER NOT NULL DEFAULT 0,
+    timezone    TEXT NOT NULL DEFAULT 'America/New_York',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);

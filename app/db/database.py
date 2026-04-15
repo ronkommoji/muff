@@ -355,6 +355,104 @@ def get_messages_count_and_range() -> dict:
     return {"count": row[0], "min_date": row[1], "max_date": row[2]}
 
 
+# ── Routine / cron helpers ────────────────────────────────────────────────────
+
+def list_crons() -> list[dict]:
+    rows = get_db().execute(
+        """SELECT id, name, prompt, hour, minute, timezone, enabled, last_run_at, created_at
+           FROM crons ORDER BY created_at DESC"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_cron(cron_id: int) -> dict | None:
+    row = get_db().execute(
+        """SELECT id, name, prompt, hour, minute, timezone, enabled, last_run_at, created_at
+           FROM crons WHERE id = ?""",
+        (cron_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def insert_cron(
+    name: str,
+    prompt: str,
+    hour: int,
+    minute: int,
+    timezone: str,
+    enabled: bool = True,
+) -> int:
+    db = get_db()
+    cur = db.execute(
+        """INSERT INTO crons (name, prompt, hour, minute, timezone, enabled)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (name, prompt, hour, minute, timezone, 1 if enabled else 0),
+    )
+    db.commit()
+    return cur.lastrowid
+
+
+def update_cron(
+    cron_id: int,
+    *,
+    name: str | None = None,
+    prompt: str | None = None,
+    hour: int | None = None,
+    minute: int | None = None,
+    timezone: str | None = None,
+    enabled: bool | None = None,
+) -> bool:
+    updates: list[str] = []
+    params: list = []
+
+    if name is not None:
+        updates.append("name = ?")
+        params.append(name)
+    if prompt is not None:
+        updates.append("prompt = ?")
+        params.append(prompt)
+    if hour is not None:
+        updates.append("hour = ?")
+        params.append(hour)
+    if minute is not None:
+        updates.append("minute = ?")
+        params.append(minute)
+    if timezone is not None:
+        updates.append("timezone = ?")
+        params.append(timezone)
+    if enabled is not None:
+        updates.append("enabled = ?")
+        params.append(1 if enabled else 0)
+
+    if not updates:
+        return False
+
+    params.append(cron_id)
+    db = get_db()
+    cur = db.execute(
+        f"UPDATE crons SET {', '.join(updates)} WHERE id = ?",
+        params,
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def delete_cron(cron_id: int) -> bool:
+    db = get_db()
+    cur = db.execute("DELETE FROM crons WHERE id = ?", (cron_id,))
+    db.commit()
+    return cur.rowcount > 0
+
+
+def touch_cron_last_run(cron_id: int) -> None:
+    db = get_db()
+    db.execute(
+        "UPDATE crons SET last_run_at = datetime('now') WHERE id = ?",
+        (cron_id,),
+    )
+    db.commit()
+
+
 # ── Session helpers ───────────────────────────────────────────────────────────
 
 def get_active_session(phone_number: str) -> dict | None:
@@ -408,6 +506,65 @@ def deactivate_current_session(phone_number: str) -> None:
         (phone_number,),
     )
     db.commit()
+
+
+def list_all_sessions(limit: int = 100) -> list[dict]:
+    """Return all sessions across all phone numbers, newest first."""
+    rows = get_db().execute(
+        """SELECT id, phone_number, session_id, is_active, preview, created_at, updated_at
+           FROM sessions ORDER BY updated_at DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_messages_for_session(session_id: str) -> list[dict]:
+    """
+    Return messages that belong to a session, ordered oldest-first.
+    Correlation is by time: messages whose from/to number matches the session's
+    phone_number and whose created_at falls within the session's lifetime
+    (from session.created_at up to but not including the next session's created_at).
+    """
+    db = get_db()
+    session = db.execute(
+        "SELECT phone_number, created_at, updated_at, is_active FROM sessions WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    if not session:
+        return []
+
+    phone = session["phone_number"]
+    start = session["created_at"]
+
+    # Upper bound: the created_at of the next newer session for the same number
+    next_row = db.execute(
+        """SELECT created_at FROM sessions
+           WHERE phone_number = ? AND created_at > ?
+           ORDER BY created_at ASC LIMIT 1""",
+        (phone, start),
+    ).fetchone()
+    end = next_row["created_at"] if next_row else None
+
+    if end:
+        rows = db.execute(
+            """SELECT id, message_handle, from_number, to_number, content, role, service, created_at
+               FROM messages
+               WHERE (from_number = ? OR to_number = ?)
+               AND created_at >= ? AND created_at < ?
+               ORDER BY created_at ASC""",
+            (phone, phone, start, end),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            """SELECT id, message_handle, from_number, to_number, content, role, service, created_at
+               FROM messages
+               WHERE (from_number = ? OR to_number = ?)
+               AND created_at >= ?
+               ORDER BY created_at ASC""",
+            (phone, phone, start),
+        ).fetchall()
+
+    return [dict(r) for r in rows]
 
 
 def list_past_sessions(phone_number: str, limit: int = 5) -> list[dict]:

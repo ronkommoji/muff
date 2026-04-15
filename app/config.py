@@ -23,8 +23,12 @@ class Settings(BaseSettings):
     # Supermemory
     supermemory_api_key: str
 
-    # Database
+    # Database (legacy SQLite — kept for reference during migration)
     db_path: str = "./data/agent.db"
+
+    # Convex
+    convex_url: str = ""
+    convex_deploy_key: str = ""
 
     # Dashboard optional basic auth (empty = disabled)
     dashboard_password: str = ""

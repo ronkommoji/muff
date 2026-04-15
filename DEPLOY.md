@@ -1,185 +1,91 @@
-# Free Deployment Guide
+# Deploying muff
 
-Two solid free options. Oracle Cloud is the better long-term choice (truly free forever,
-more RAM than you'll ever need). Fly.io is faster to set up.
+## Local Development
 
----
+Use the startup script to run everything with one command:
 
-## Option A — Oracle Cloud Always Free (Recommended)
-
-Oracle gives you a free ARM VM **permanently** — 4 OCPUs, 24 GB RAM. No credit card expiry risk,
-no spin-downs.
-
-### 1. Create a free account
-Go to https://www.oracle.com/cloud/free/ and sign up.
-Select a home region close to you (you can't change it later).
-You'll need a credit card for identity verification — you will NOT be charged.
-
-### 2. Create the VM
-1. Console → Compute → Instances → Create Instance
-2. Change shape: **Ampere → VM.Standard.A1.Flex** (ARM) → 4 OCPUs / 24 GB RAM
-3. Image: **Ubuntu 22.04**
-4. Add your SSH public key (`~/.ssh/id_rsa.pub` or generate one with `ssh-keygen`)
-5. Create — note the public IP
-
-### 3. Open firewall ports
-Compute → Instances → your instance → Subnet → Security List → Add Ingress Rules:
-- Source: `0.0.0.0/0` | Protocol: TCP | Port: **3000** (dashboard + webhook)
-- Source: `0.0.0.0/0` | Protocol: TCP | Port: **443** (HTTPS, if you set up a domain)
-
-Also run on the VM itself:
 ```bash
-sudo iptables -I INPUT -p tcp --dport 3000 -j ACCEPT
-sudo iptables -I INPUT -p tcp --dport 443 -j ACCEPT
-sudo netfilter-persistent save
+./dev.sh
 ```
 
-### 4. Set up the server
-SSH in and install deps:
+This starts:
+- Python FastAPI backend on `:3000`
+- Convex dev server (watches `dashboard-src/convex/`)
+- ngrok tunnel (exposes `:3000` publicly for Sendblue webhooks)
+
 ```bash
-ssh ubuntu@<YOUR_VM_IP>
-
-sudo apt update && sudo apt install -y python3 python3-pip python3-venv git
-
-# Clone or copy your project (from your Mac)
-# On your Mac: scp -r ~/Desktop/muff ubuntu@<YOUR_VM_IP>:~/muff
+./dev.sh --no-ngrok   # skip ngrok if using a static tunnel
 ```
 
-### 5. Configure and run
+**First-time setup:**
 ```bash
-cd ~/muff
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-cp .env.example .env
-nano .env   # fill in all your API keys
+cd dashboard-src && npm install && cd ..
 ```
-
-### 6. Run as a systemd service (auto-restart, survives reboots)
-```bash
-sudo nano /etc/systemd/system/muff-agent.service
-```
-
-Paste:
-```ini
-[Unit]
-Description=Personal AI Agent
-After=network.target
-
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/muff
-EnvironmentFile=/home/ubuntu/muff/.env
-ExecStart=/home/ubuntu/muff/.venv/bin/python run.py
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable muff-agent
-sudo systemctl start muff-agent
-sudo systemctl status muff-agent   # should show active (running)
-
-# Watch logs live:
-sudo journalctl -fu muff-agent
-```
-
-### 7. Free HTTPS with Caddy (optional but recommended)
-If you have a domain (even a free one from https://www.duckdns.org):
-
-```bash
-sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
-curl -1sLf 'https://dl.cloudflare.com/keyless-ssl/linux/debian/caddy.list' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-curl -1sLf 'https://dl.cloudflare.com/keyless-ssl/linux/debian/gpg' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-sudo apt install -y caddy
-```
-
-`sudo nano /etc/caddy/Caddyfile`:
-```
-yourdomain.duckdns.org {
-    reverse_proxy localhost:3000
-}
-```
-
-```bash
-sudo systemctl restart caddy
-```
-
-Caddy auto-provisions a free Let's Encrypt certificate.
-
-**Webhook URL:** `https://yourdomain.duckdns.org/webhook/sendblue`
-**Dashboard:** `https://yourdomain.duckdns.org`
-
-Without a domain, use: `http://<YOUR_VM_IP>:3000`
 
 ---
 
-## Option B — Fly.io Free Tier
+## Architecture Overview
 
-Fly gives you 3 free shared VMs with auto-HTTPS. Easier setup, but shared hardware and
-limited to 256 MB RAM free.
+```
+Sendblue → Python FastAPI (your server)
+                ↓
+           Claude Agent SDK
+                ↓
+         Composio MCP (Gmail, Calendar)
+                ↓
+           Convex DB (cloud)
+                ↑
+         Dashboard (React) ← Convex realtime
+```
 
-### 1. Install Fly CLI
+**Convex is always in the cloud** regardless of where the Python server lives.
+**Cron jobs run in Convex** and call back to the Python server via `PYTHON_BACKEND_URL`.
+
+---
+
+## Production Deployment Options
+
+### Option 1: Fly.io (recommended — easiest)
+
+Free tier: 3 shared VMs, 256 MB RAM, auto-HTTPS.
+
 ```bash
+# Install CLI
 curl -L https://fly.io/install.sh | sh
-fly auth signup   # or fly auth login
-```
+fly auth login
 
-### 2. Add Dockerfile to your project
-Create `~/Desktop/muff/Dockerfile`:
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-RUN mkdir -p data
-EXPOSE 3000
-CMD ["python", "run.py"]
-```
-
-### 3. Launch
-```bash
+# Deploy (fly.toml already configured)
 cd ~/Desktop/muff
-fly launch --name muff-agent --region iad --no-deploy
+fly deploy
 ```
 
-Set your secrets (replaces .env on Fly):
+Set secrets (your .env values):
 ```bash
 fly secrets set \
-  SENDBLUE_API_KEY=sb_key_... \
-  SENDBLUE_API_SECRET=sb_secret_... \
+  SENDBLUE_API_KEY=... \
+  SENDBLUE_API_SECRET=... \
   MY_SENDBLUE_NUMBER=+1... \
   USER_PHONE_NUMBER=+1... \
   ANTHROPIC_API_KEY=sk-ant-... \
   COMPOSIO_API_KEY=... \
   COMPOSIO_USER_ID=personal \
   SUPERMEMORY_API_KEY=sm_... \
-  DB_PATH=/app/data/agent.db \
+  CONVEX_URL=https://grand-whale-75.convex.cloud \
+  CONVEX_DEPLOY_KEY=... \
   PORT=3000
 ```
 
-Mount a volume for the SQLite database (free 1 GB):
+After deploy:
 ```bash
-fly volumes create muff_data --region iad --size 1
-```
+# Set Convex to call back to your Fly URL
+cd dashboard-src
+npx convex env set PYTHON_BACKEND_URL https://muff-agent.fly.dev
 
-Add to `fly.toml` under `[mounts]`:
-```toml
-[[mounts]]
-  source = "muff_data"
-  destination = "/app/data"
-```
-
-Deploy:
-```bash
-fly deploy
+# Re-enable crons in convex/crons.ts (uncomment the crons)
+# Then deploy Convex to production:
+npx convex deploy
 ```
 
 **Webhook URL:** `https://muff-agent.fly.dev/webhook/sendblue`
@@ -187,46 +93,201 @@ fly deploy
 
 ---
 
-## Set the Webhook URL in Sendblue
+### Option 2: Railway
 
-Once deployed, go to your **Sendblue dashboard → Webhooks** and set the receive URL to:
+Railway gives $5/month free credits, simple Git-push deploys, and persistent storage. Good Fly.io alternative.
 
-| Deployment | Webhook URL |
-|---|---|
-| Oracle + domain | `https://yourdomain.duckdns.org/webhook/sendblue` |
-| Oracle IP only | `http://<YOUR_VM_IP>:3000/webhook/sendblue` |
-| Fly.io | `https://muff-agent.fly.dev/webhook/sendblue` |
+```bash
+# Install CLI
+npm install -g @railway/cli
+railway login
+
+# Init and deploy
+cd ~/Desktop/muff
+railway init
+railway up
+```
+
+Set environment variables in the Railway dashboard, or:
+```bash
+railway variables set SENDBLUE_API_KEY=... ANTHROPIC_API_KEY=... # etc
+```
+
+Add a volume for the DB if not using Convex for all data:
+- Railway dashboard → your service → Volumes → Add `/app/data`
+
+**Webhook URL:** `https://<your-app>.railway.app/webhook/sendblue`
+
+---
+
+### Option 3: Oracle Cloud Always Free (best value)
+
+ARM VM with 4 OCPUs + 24 GB RAM, **never expires**, completely free.
+
+```bash
+# 1. Create account at cloud.oracle.com
+# 2. Create an Always Free ARM instance (Ampere A1)
+#    Shape: VM.Standard.A1.Flex, 4 OCPU, 24 GB RAM
+#    OS: Ubuntu 22.04
+# 3. SSH in and install dependencies
+sudo apt update && sudo apt install -y python3 python3-venv python3-pip nginx certbot
+
+# 4. Clone and set up
+git clone <your-repo> /home/ubuntu/muff
+cd /home/ubuntu/muff
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# 5. Create .env with your keys
+cp .env.example .env
+nano .env
+
+# 6. Create systemd service for auto-restart
+sudo tee /etc/systemd/system/muff.service > /dev/null <<EOF
+[Unit]
+Description=muff agent
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/muff
+ExecStart=/home/ubuntu/muff/.venv/bin/python run.py
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/ubuntu/muff/.env
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl enable muff
+sudo systemctl start muff
+
+# 7. Set up nginx reverse proxy + SSL
+sudo certbot --nginx -d yourdomain.com
+```
+
+**Webhook URL:** `https://yourdomain.com/webhook/sendblue`
+
+---
+
+### Option 4: Render
+
+Free tier available, auto-deploys from GitHub, built-in HTTPS.
+
+1. Push repo to GitHub
+2. New Web Service → connect repo
+3. Build command: `pip install -r requirements.txt`
+4. Start command: `python run.py`
+5. Add environment variables in the dashboard
+
+**Note:** Free tier spins down after inactivity — use a paid plan ($7/mo) for always-on.
+
+---
+
+### Vercel (dashboard only — not the Python server)
+
+**Do not deploy the FastAPI app to Vercel.** This project needs a long‑running process (webhooks, background agent runs, Claude Agent SDK loop). Vercel’s serverless model has short timeouts and is a poor fit for that workload. Keep the Python server on Fly.io, Railway, Render, Oracle, or another VM/container host.
+
+**What Vercel is good for here:** hosting the **Vite dashboard** as a static site, while Convex still handles realtime data and your Python API stays on another URL.
+
+1. Deploy the Python backend first and note its public origin, e.g. `https://muff-agent.fly.dev`.
+2. In the Vercel project, set `VITE_CONVEX_URL` to your production Convex URL (same as in `.env.local`).
+3. Add a rewrite so browser calls to `/api/*` hit your Python server (the dashboard uses same‑origin `/api/...`):
+
+```json
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://muff-agent.fly.dev/api/:path*"
+    }
+  ]
+}
+```
+
+Put that in `vercel.json` at the repo root **or** configure equivalent rewrites in the Vercel dashboard. Adjust the destination host to match your real backend.
+
+**Important:** Sendblue webhooks and Convex cron callbacks (`PYTHON_BACKEND_URL`) must still point at the **Python** host, not the Vercel URL.
+
+---
+
+## After Any Deployment
+
+### 1. Update Sendblue webhook
+Go to [sendblue.co/dashboard](https://sendblue.co/dashboard) → Webhooks → set URL to:
+```
+https://<your-domain>/webhook/sendblue
+```
+
+### 2. Update Convex backend URL
+```bash
+cd dashboard-src
+npx convex env set PYTHON_BACKEND_URL https://<your-domain>
+```
+
+### 3. Deploy Convex to production
+```bash
+cd dashboard-src
+# Re-enable crons in convex/crons.ts first, then:
+npx convex deploy
+```
+
+### 4. Build and include the dashboard
+```bash
+cd dashboard-src
+npm run build   # outputs to app/dashboard/
+```
+The dashboard is served as static files by FastAPI at `/`.
 
 ---
 
 ## Deploying Updates
 
-**Oracle Cloud:**
-```bash
-# On your Mac — copy changed files
-scp -r ~/Desktop/muff ubuntu@<YOUR_VM_IP>:~/muff
-
-# On the VM — restart
-sudo systemctl restart muff-agent
-```
-
 **Fly.io:**
 ```bash
-cd ~/Desktop/muff
 fly deploy
+```
+
+**Railway:**
+```bash
+railway up
+# or: push to GitHub if auto-deploy is enabled
+```
+
+**Oracle/VPS:**
+```bash
+git pull
+sudo systemctl restart muff
+```
+
+**Convex functions** (schema, queries, crons):
+```bash
+cd dashboard-src
+npx convex deploy
 ```
 
 ---
 
-## Free Tier Limits Summary
+## Environment Variables Reference
 
-| | Oracle Cloud | Fly.io |
-|---|---|---|
-| RAM | 24 GB | 256 MB |
-| CPU | 4 ARM cores | Shared |
-| Storage | 200 GB block | 1 GB volume |
-| Bandwidth | 10 TB/mo | 160 GB/mo |
-| HTTPS | Via Caddy + domain | Auto, included |
-| Always on | Yes | Yes (within free limits) |
-| Expires | Never | Never (requires credit card) |
-| Best for | This project | Quick start |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SENDBLUE_API_KEY` | ✓ | Sendblue API key |
+| `SENDBLUE_API_SECRET` | ✓ | Sendblue API secret |
+| `MY_SENDBLUE_NUMBER` | ✓ | Your Sendblue iMessage number |
+| `USER_PHONE_NUMBER` | ✓ | Your personal phone number (who the agent talks to) |
+| `ANTHROPIC_API_KEY` | ✓ | Claude API key |
+| `COMPOSIO_API_KEY` | ✓ | Composio API key |
+| `COMPOSIO_USER_ID` | ✓ | Composio user ID (default: `personal`) |
+| `SUPERMEMORY_API_KEY` | ✓ | Supermemory API key |
+| `CONVEX_URL` | ✓ | Convex deployment URL |
+| `CONVEX_DEPLOY_KEY` | ✓ | Convex deploy key (for server-side mutations) |
+| `DASHBOARD_PASSWORD` | — | Basic auth password for `/api/*` (leave empty to disable) |
+| `PORT` | — | Server port (default: `3000`) |
+
+**Convex environment variables** (set via `npx convex env set`):
+
+| Variable | Description |
+|----------|-------------|
+| `PYTHON_BACKEND_URL` | Public URL of your Python server (for cron callbacks) |

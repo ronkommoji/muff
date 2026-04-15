@@ -1,6 +1,9 @@
 """
-Scheduled cron job implementations.
-Registered with APScheduler in app/main.py on startup.
+Cron job implementations.
+
+NOTE: Scheduling is now handled by Convex (see dashboard-src/convex/crons.ts).
+This file is kept only for the morning_briefing function which may be called
+from the /internal/run-routine endpoint via Convex cron actions.
 """
 import logging
 

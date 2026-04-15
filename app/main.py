@@ -1,14 +1,16 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
+import logging
 
-from app.db.database import init_db
+from app.db.convex_client import init_db
 from app.routes.webhook import router as webhook_router
 from app.routes.dashboard import router as dashboard_router
 from app.config import settings
 
 app = FastAPI(title="Personal Agent", docs_url=None, redoc_url=None)
+logger = logging.getLogger(__name__)
 
 
 # ── Startup / shutdown ────────────────────────────────────────────────────────
@@ -16,53 +18,38 @@ app = FastAPI(title="Personal Agent", docs_url=None, redoc_url=None)
 @app.on_event("startup")
 async def on_startup() -> None:
     init_db()
-    _start_scheduler()
 
 
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    _stop_scheduler()
+# ── Internal endpoint for Convex cron callbacks ──────────────────────────────
 
+@app.post("/internal/run-routine")
+async def run_routine_internal(request: Request):
+    """
+    Called by Convex cron actions to trigger the agent pipeline.
+    Accepts {"prompt": str, "routine_id": str | null}.
+    """
+    from app.agent.runner import run_agent
+    from app.services.sendblue import SendbluePayload
 
-# ── Scheduler ─────────────────────────────────────────────────────────────────
+    data = await request.json()
+    prompt = data.get("prompt", "")
+    if not prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt is required"})
 
-_scheduler = None
-
-
-def _start_scheduler() -> None:
-    global _scheduler
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    from apscheduler.triggers.cron import CronTrigger
-    from app.agent.crons import morning_briefing
-
-    _scheduler = AsyncIOScheduler()
-
-    if settings.morning_briefing_enabled:
-        _scheduler.add_job(
-            morning_briefing,
-            CronTrigger(
-                hour=settings.morning_briefing_hour,
-                minute=settings.morning_briefing_minute,
-                timezone=settings.morning_briefing_tz,
-            ),
-            id="morning_briefing",
-            replace_existing=True,
-        )
-        print(
-            f"[scheduler] Morning briefing scheduled at "
-            f"{settings.morning_briefing_hour:02d}:{settings.morning_briefing_minute:02d} "
-            f"{settings.morning_briefing_tz}"
-        )
-
-    _scheduler.start()
-    print("[scheduler] Started")
-
-
-def _stop_scheduler() -> None:
-    global _scheduler
-    if _scheduler and _scheduler.running:
-        _scheduler.shutdown(wait=False)
-        print("[scheduler] Stopped")
+    payload = SendbluePayload(
+        content=prompt,
+        from_number=settings.user_phone_number,
+        to_number=settings.my_sendblue_number,
+        message_handle=None,
+        is_outbound=False,
+        service="iMessage",
+    )
+    try:
+        await run_agent(payload)
+        return {"ok": True}
+    except Exception as exc:
+        logger.error("[internal] run-routine failed: %s", exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -70,8 +57,12 @@ def _stop_scheduler() -> None:
 app.include_router(webhook_router, prefix="/webhook")
 app.include_router(dashboard_router, prefix="/api")
 
-# Serve dashboard static files
 _dashboard_dir = Path(__file__).parent / "dashboard"
+_assets_dir = _dashboard_dir / "assets"
+
+if _assets_dir.exists():
+    app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
+
 app.mount("/static", StaticFiles(directory=str(_dashboard_dir)), name="static")
 
 
