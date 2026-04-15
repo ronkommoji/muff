@@ -1,12 +1,11 @@
 """
-Builds the context (system prompt + message history) for the Claude call.
+Builds the system prompt for the Claude Agent SDK query.
 
-Fetches conversation history from SQLite and relevant memories from
-Supermemory in parallel, then combines them into a rich system prompt.
+Message history is now managed by Agent SDK sessions (stored on disk and
+resumed via session_id) — this module only constructs the system prompt
+with the current date/time and relevant long-term memories.
 """
-import asyncio
 from datetime import datetime
-from app.db.database import get_recent_messages
 from app.services.supermemory import search_memories
 from app.config import settings
 
@@ -34,38 +33,21 @@ MEMORY_SECTION = """\
 """
 
 
-async def build_context(from_number: str, incoming_message: str) -> dict:
+async def build_system_prompt(incoming_message: str) -> str:
     """
-    Return a dict with keys:
-        system   — system prompt string
-        messages — list of Anthropic message dicts (conversation history)
+    Return the system prompt string with relevant memories injected.
+    Called once per incoming message before running the agent query.
     """
-    # Fetch history + memories in parallel
-    history_rows, memory_snippets = await asyncio.gather(
-        asyncio.to_thread(get_recent_messages, from_number, 20),
-        search_memories(incoming_message, limit=5),
-    )
+    memory_snippets = await search_memories(incoming_message, limit=5)
 
-    # Build memory section
     if memory_snippets:
         memories_text = "\n".join(f"- {s}" for s in memory_snippets)
         memory_section = MEMORY_SECTION.format(memories=memories_text)
     else:
         memory_section = ""
 
-    system_prompt = SYSTEM_TEMPLATE.format(
+    return SYSTEM_TEMPLATE.format(
         datetime=datetime.now().strftime("%A, %B %d %Y at %I:%M %p"),
         my_number=settings.my_sendblue_number,
         memory_section=memory_section,
     )
-
-    # Convert SQLite history rows to Anthropic message format
-    messages: list[dict] = []
-    for row in history_rows:
-        role = "user" if row["role"] == "user" else "assistant"
-        messages.append({"role": role, "content": row["content"]})
-
-    # Append the current incoming message (not yet in DB when context is built)
-    messages.append({"role": "user", "content": incoming_message})
-
-    return {"system": system_prompt, "messages": messages}

@@ -1,36 +1,51 @@
 """
 Composio service wrapper.
 
-Uses the composio + composio_anthropic packages to provide Claude-compatible
-tool definitions for Gmail, Google Calendar, and any other connected apps.
+Provides MCP server configuration for the Claude Agent SDK, plus dashboard
+helpers for app management and OAuth flows.
+
+Tool execution is handled automatically by the Agent SDK via MCP — no manual
+tool loop or AnthropicProvider needed.
 """
 import httpx
 from composio import Composio
-from composio_anthropic import AnthropicProvider
 from app.config import settings
 
-_composio = Composio(
-    api_key=settings.composio_api_key,
-    provider=AnthropicProvider(),
-)
+_composio = Composio(api_key=settings.composio_api_key)
 
 COMPOSIO_API_BASE = "https://backend.composio.dev/api/v1"
 
-# Apps we want to expose as tools to the agent
-APPS = ["GMAIL", "GOOGLECALENDAR"]
+# Toolkits exposed to the agent via Composio MCP
+TOOLKITS = ["GMAIL", "GOOGLECALENDAR"]
 
 
-def get_tools(user_id: str | None = None) -> list:
-    """Return Claude-format tool definitions for all connected apps."""
-    uid = user_id or settings.composio_user_id
-    session = _composio.create(user_id=uid)
-    return session.tools()
+def get_mcp_config() -> dict:
+    """
+    Return MCP server configuration for the Claude Agent SDK.
 
+    Composio exposes per-toolkit MCP endpoints. We connect to Gmail and
+    Google Calendar separately so each can be loaded independently.
 
-def handle_tool_calls(response, user_id: str | None = None) -> list:
-    """Execute tool calls from a Claude response and return tool_result blocks."""
-    uid = user_id or settings.composio_user_id
-    return _composio.provider.handle_tool_calls(user_id=uid, response=response)
+    Verify exact URLs from:
+      composio.dev/toolkits/googlecalendar/framework/claude-agents-sdk
+      composio.dev/toolkits/gmail/framework/claude-agents-sdk
+    """
+    headers = {
+        "x-composio-api-key": settings.composio_api_key,
+        "x-composio-user-id": settings.composio_user_id,
+    }
+    return {
+        "composio-calendar": {
+            "type": "http",
+            "url": "https://mcp.composio.dev/googlecalendar",
+            "headers": headers,
+        },
+        "composio-gmail": {
+            "type": "http",
+            "url": "https://mcp.composio.dev/gmail",
+            "headers": headers,
+        },
+    }
 
 
 def authorize_app(app: str, user_id: str | None = None) -> str:

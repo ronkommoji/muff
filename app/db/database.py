@@ -171,3 +171,25 @@ def get_recent_tool_calls(limit: int = 50) -> list[dict]:
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Session helpers ───────────────────────────────────────────────────────────
+
+def get_session_id(phone_number: str) -> str | None:
+    row = get_db().execute(
+        "SELECT session_id FROM sessions WHERE phone_number = ?", (phone_number,)
+    ).fetchone()
+    return row["session_id"] if row else None
+
+
+def save_session_id(phone_number: str, session_id: str) -> None:
+    db = get_db()
+    db.execute(
+        """INSERT INTO sessions (phone_number, session_id, updated_at)
+           VALUES (?, ?, datetime('now'))
+           ON CONFLICT(phone_number) DO UPDATE SET
+               session_id = excluded.session_id,
+               updated_at = excluded.updated_at""",
+        (phone_number, session_id),
+    )
+    db.commit()

@@ -35,3 +35,9 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS sessions (
+    phone_number TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
