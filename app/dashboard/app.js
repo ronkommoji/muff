@@ -1,16 +1,23 @@
 /* ── Tab navigation ───────────────────────────────────────────── */
+let _activeTab = "messages";
+
 document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
     const tab = btn.dataset.tab;
+    _activeTab = tab;
     document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
     document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
     btn.classList.add("active");
     document.getElementById(`tab-${tab}`).classList.add("active");
 
-    if (tab === "messages") loadMessages();
+    // SSE-backed tabs use cached data; others fetch on demand
+    if (tab === "messages" && _sseData.messages) renderMessages(_sseData.messages);
+    else if (tab === "messages") loadMessages();
+    if (tab === "toolcalls" && _sseData.tool_calls) renderToolCalls(_sseData.tool_calls);
+    else if (tab === "toolcalls") loadToolCalls();
+    if (tab === "usage" && _sseData.usage) renderUsage(_sseData.usage);
+    else if (tab === "usage") loadUsage();
     if (tab === "tools") loadApps();
-    if (tab === "toolcalls") loadToolCalls();
-    if (tab === "usage") loadUsage();
     if (tab === "charts") loadCharts();
     if (tab === "logs") loadLogs();
     if (tab === "database") loadDbTables();
@@ -55,30 +62,62 @@ async function checkStatus() {
   updateTabStats();
 }
 
+/* ── SSE real-time stream ─────────────────────────────────────── */
+let _sseData = { messages: null, tool_calls: null, usage: null };
+
+function startSSE() {
+  const source = new EventSource("/api/stream");
+
+  source.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    _sseData = data;
+
+    // Always update the header cost badge
+    if (data.usage && data.usage.month_cost_usd !== undefined) {
+      const badge = document.getElementById("header-cost");
+      if (badge) badge.textContent = `$${data.usage.month_cost_usd.toFixed(4)} this month`;
+    }
+
+    // Re-render the currently visible tab
+    if (_activeTab === "messages" && data.messages) renderMessages(data.messages);
+    if (_activeTab === "toolcalls" && data.tool_calls) renderToolCalls(data.tool_calls);
+    if (_activeTab === "usage" && data.usage) renderUsage(data.usage);
+  };
+
+  source.onerror = () => {
+    source.close();
+    // Reconnect after 5 seconds
+    setTimeout(startSSE, 5000);
+  };
+}
+
 /* ── Messages ─────────────────────────────────────────────────── */
+function renderMessages(msgs) {
+  // API returns DESC order; reverse to show oldest→newest (scroll to bottom)
+  const ordered = msgs.slice().reverse();
+  if (!ordered.length) {
+    setEl("messages-list", '<p class="empty">No messages yet.</p>');
+    return;
+  }
+  const html = ordered
+    .map(
+      (m) => `
+      <div class="message-bubble ${escapeHtml(m.role)}">
+        ${escapeHtml(m.content)}
+        <div class="bubble-meta">${escapeHtml(m.role)} · ${fmtDate(m.created_at)}</div>
+      </div>`
+    )
+    .join("");
+  setEl("messages-list", html);
+  const el = document.getElementById("messages-list");
+  el.scrollTop = el.scrollHeight;
+}
+
 async function loadMessages() {
   setEl("messages-list", '<p class="loading">Loading…</p>');
   try {
     const data = await apiFetch("/messages?limit=100");
-    const msgs = data.messages || [];
-    if (!msgs.length) {
-      setEl("messages-list", '<p class="empty">No messages yet.</p>');
-      return;
-    }
-    const html = msgs
-      .slice()
-      .reverse()
-      .map(
-        (m) => `
-        <div class="message-bubble ${escapeHtml(m.role)}">
-          ${escapeHtml(m.content)}
-          <div class="bubble-meta">${escapeHtml(m.role)} · ${fmtDate(m.created_at)}</div>
-        </div>`
-      )
-      .join("");
-    setEl("messages-list", html);
-    const el = document.getElementById("messages-list");
-    el.scrollTop = el.scrollHeight;
+    renderMessages(data.messages || []);
   } catch (e) {
     setEl("messages-list", `<p class="error">Error: ${escapeHtml(e.message)}</p>`);
   }
@@ -277,94 +316,100 @@ function showOAuthToast(appName, url, errorMsg) {
 }
 
 /* ── Tool Calls ───────────────────────────────────────────────── */
+function renderToolCalls(calls) {
+  if (!calls.length) {
+    setEl("toolcalls-list", '<p class="empty">No tool calls logged yet.</p>');
+    return;
+  }
+  const html = calls
+    .map((c) => {
+      let input = c.input_json;
+      let output = c.output_json;
+      try { input = JSON.stringify(JSON.parse(input), null, 2); } catch {}
+      try { output = JSON.stringify(JSON.parse(output), null, 2); } catch {}
+      return `
+        <div class="card">
+          <div class="card-title">${escapeHtml(c.tool_name)} <span class="badge grey">${fmtDate(c.created_at)}</span></div>
+          ${c.message_content ? `<div class="card-body" style="margin-bottom:.5rem">Triggered by: "${escapeHtml(c.message_content.slice(0, 80))}"</div>` : ""}
+          <details>
+            <summary style="cursor:pointer;color:var(--muted);font-size:12px">Input / Output</summary>
+            <pre>${escapeHtml(input || "")}</pre>
+            ${output ? `<pre>${escapeHtml(output || "")}</pre>` : ""}
+          </details>
+        </div>`;
+    })
+    .join("");
+  setEl("toolcalls-list", html);
+}
+
 async function loadToolCalls() {
   setEl("toolcalls-list", '<p class="loading">Loading…</p>');
   try {
     const data = await apiFetch("/tool-calls?limit=50");
-    const calls = data.tool_calls || [];
-    if (!calls.length) {
-      setEl("toolcalls-list", '<p class="empty">No tool calls logged yet.</p>');
-      return;
-    }
-    const html = calls
-      .map((c) => {
-        let input = c.input_json;
-        let output = c.output_json;
-        try { input = JSON.stringify(JSON.parse(input), null, 2); } catch {}
-        try { output = JSON.stringify(JSON.parse(output), null, 2); } catch {}
-        return `
-          <div class="card">
-            <div class="card-title">${escapeHtml(c.tool_name)} <span class="badge grey">${fmtDate(c.created_at)}</span></div>
-            ${c.message_content ? `<div class="card-body" style="margin-bottom:.5rem">Triggered by: "${escapeHtml(c.message_content.slice(0, 80))}"</div>` : ""}
-            <details>
-              <summary style="cursor:pointer;color:var(--muted);font-size:12px">Input / Output</summary>
-              <pre>${escapeHtml(input || "")}</pre>
-              ${output ? `<pre>${escapeHtml(output || "")}</pre>` : ""}
-            </details>
-          </div>`;
-      })
-      .join("");
-    setEl("toolcalls-list", html);
+    renderToolCalls(data.tool_calls || []);
   } catch (e) {
     setEl("toolcalls-list", `<p class="error">Error: ${escapeHtml(e.message)}</p>`);
   }
 }
 
 /* ── Usage & Cost ─────────────────────────────────────────────── */
+function renderUsage(d) {
+  // Stat cards
+  const stats = `
+    <div class="stat-card">
+      <div class="stat-value">$${d.total_cost_usd.toFixed(4)}</div>
+      <div class="stat-label">Total spend</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">$${d.month_cost_usd.toFixed(4)}</div>
+      <div class="stat-label">This month</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">${(d.total_input_tokens + d.total_output_tokens).toLocaleString()}</div>
+      <div class="stat-label">Total tokens</div>
+    </div>
+    <div class="stat-card" style="grid-column: span 1">
+      <div style="padding-top:.25rem">
+        ${(d.per_model || []).map(m => `
+          <div class="model-row">
+            <span style="color:var(--muted)">${escapeHtml(m.model.split('-').slice(1,3).join('-'))}</span>
+            <span>$${m.cost_usd.toFixed(4)} <span style="color:var(--muted)">(${m.calls} calls)</span></span>
+          </div>`).join("") || '<span class="empty">No data</span>'}
+      </div>
+      <div class="stat-label" style="margin-top:.5rem">By model</div>
+    </div>`;
+  setEl("usage-stats", stats);
+
+  // Update header cost badge
+  const badge = document.getElementById("header-cost");
+  if (badge) badge.textContent = `$${d.month_cost_usd.toFixed(4)} this month`;
+
+  // Per-message log
+  const recent = d.recent || [];
+  if (!recent.length) {
+    setEl("usage-log", '<p class="empty">No usage recorded yet.</p>');
+    return;
+  }
+  const logHtml = recent.map(r => `
+    <div class="card">
+      <div class="card-title" style="font-weight:normal;font-size:13px">
+        <span style="color:var(--muted)">${escapeHtml(r.model.split('-').slice(1,3).join('-'))}</span>
+        <span class="badge grey">${fmtDate(r.created_at)}</span>
+        <span style="margin-left:auto;color:var(--accent)">$${Number(r.cost_usd).toFixed(6)}</span>
+      </div>
+      <div class="card-body">
+        ${r.input_tokens.toLocaleString()} in / ${r.output_tokens.toLocaleString()} out tokens
+        ${r.message_preview ? ` · "${escapeHtml(String(r.message_preview).slice(0,60))}"` : ""}
+      </div>
+    </div>`).join("");
+  setEl("usage-log", logHtml);
+}
+
 async function loadUsage() {
   setEl("usage-log", '<p class="loading">Loading…</p>');
   try {
     const d = await apiFetch("/usage");
-
-    // Stat cards
-    const stats = `
-      <div class="stat-card">
-        <div class="stat-value">$${d.total_cost_usd.toFixed(4)}</div>
-        <div class="stat-label">Total spend</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">$${d.month_cost_usd.toFixed(4)}</div>
-        <div class="stat-label">This month</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">${(d.total_input_tokens + d.total_output_tokens).toLocaleString()}</div>
-        <div class="stat-label">Total tokens</div>
-      </div>
-      <div class="stat-card" style="grid-column: span 1">
-        <div style="padding-top:.25rem">
-          ${(d.per_model || []).map(m => `
-            <div class="model-row">
-              <span style="color:var(--muted)">${escapeHtml(m.model.split('-').slice(1,3).join('-'))}</span>
-              <span>$${m.cost_usd.toFixed(4)} <span style="color:var(--muted)">(${m.calls} calls)</span></span>
-            </div>`).join("") || '<span class="empty">No data</span>'}
-        </div>
-        <div class="stat-label" style="margin-top:.5rem">By model</div>
-      </div>`;
-    setEl("usage-stats", stats);
-
-    // Update header cost badge
-    const badge = document.getElementById("header-cost");
-    if (badge) badge.textContent = `$${d.month_cost_usd.toFixed(4)} this month`;
-
-    // Per-message log
-    const recent = d.recent || [];
-    if (!recent.length) {
-      setEl("usage-log", '<p class="empty">No usage recorded yet.</p>');
-      return;
-    }
-    const logHtml = recent.map(r => `
-      <div class="card">
-        <div class="card-title" style="font-weight:normal;font-size:13px">
-          <span style="color:var(--muted)">${escapeHtml(r.model.split('-').slice(1,3).join('-'))}</span>
-          <span class="badge grey">${fmtDate(r.created_at)}</span>
-          <span style="margin-left:auto;color:var(--accent)">$${Number(r.cost_usd).toFixed(6)}</span>
-        </div>
-        <div class="card-body">
-          ${r.input_tokens.toLocaleString()} in / ${r.output_tokens.toLocaleString()} out tokens
-          ${r.message_preview ? ` · "${escapeHtml(String(r.message_preview).slice(0,60))}"` : ""}
-        </div>
-      </div>`).join("");
-    setEl("usage-log", logHtml);
+    renderUsage(d);
   } catch (e) {
     setEl("usage-log", `<p class="error">Error: ${escapeHtml(e.message)}</p>`);
   }
@@ -790,10 +835,4 @@ async function loadTableData(offset = 0) {
 /* ── Init ─────────────────────────────────────────────────────── */
 checkStatus();
 loadMessages();
-// Load usage summary quietly for the header badge
-apiFetch("/usage").then(d => {
-  const badge = document.getElementById("header-cost");
-  if (badge && d.month_cost_usd !== undefined) {
-    badge.textContent = `$${d.month_cost_usd.toFixed(4)} this month`;
-  }
-}).catch(() => {});
+startSSE();

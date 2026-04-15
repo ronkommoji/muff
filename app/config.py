@@ -29,5 +29,15 @@ class Settings(BaseSettings):
     # Dashboard optional basic auth (empty = disabled)
     dashboard_password: str = ""
 
+    # Morning briefing cron job
+    morning_briefing_enabled: bool = True
+    morning_briefing_hour: int = 8
+    morning_briefing_minute: int = 0
+    morning_briefing_tz: str = "America/New_York"
+    morning_briefing_prompt: str = (
+        "Good morning! Give me a quick daily briefing: "
+        "anything on my calendar today, and check if I have any urgent unread emails."
+    )
+
 
 settings = Settings()

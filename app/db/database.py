@@ -1,4 +1,3 @@
-import os
 import sqlite3
 from pathlib import Path
 from app.config import settings
@@ -25,9 +24,48 @@ def init_db() -> None:
 
     schema_path = Path(__file__).parent / "schema.sql"
     _db.executescript(schema_path.read_text())
+    _migrate_sessions_if_needed()
     _db.commit()
 
     print(f"[db] Initialized at {db_path.resolve()}")
+
+
+def _migrate_sessions_if_needed() -> None:
+    """
+    Migrate sessions table from v1 (phone_number PRIMARY KEY, single session per user)
+    to v2 (multi-row with is_active flag) if the old schema is detected.
+    Safe to call on a fresh DB — it no-ops if the table doesn't exist yet or is already v2.
+    """
+    db = get_db()
+    info = db.execute("PRAGMA table_info(sessions)").fetchall()
+    if not info:
+        return  # table not created yet; schema.sql will handle it
+    cols = {row["name"] for row in info}
+    if "is_active" in cols:
+        return  # already v2
+
+    print("[db] Migrating sessions table to v2 schema...")
+    db.execute("ALTER TABLE sessions RENAME TO _sessions_v1")
+    db.execute("""
+        CREATE TABLE sessions (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT NOT NULL,
+            session_id   TEXT NOT NULL,
+            is_active    INTEGER NOT NULL DEFAULT 1,
+            preview      TEXT,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    db.execute("""
+        INSERT INTO sessions (phone_number, session_id, is_active, updated_at)
+        SELECT phone_number, session_id, 1, updated_at FROM _sessions_v1
+    """)
+    db.execute("DROP TABLE _sessions_v1")
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sid   ON sessions(session_id)")
+    db.execute("CREATE INDEX        IF NOT EXISTS idx_sessions_phone ON sessions(phone_number, updated_at DESC)")
+    db.commit()
+    print("[db] Sessions table migrated.")
 
 
 # ── Message helpers ───────────────────────────────────────────────────────────
@@ -65,7 +103,6 @@ def get_recent_messages(from_number: str, limit: int = 20) -> list[dict]:
            ORDER BY created_at DESC LIMIT ?""",
         (from_number, from_number, limit),
     ).fetchall()
-    # Return in chronological order for the prompt
     return [dict(r) for r in reversed(rows)]
 
 
@@ -320,21 +357,79 @@ def get_messages_count_and_range() -> dict:
 
 # ── Session helpers ───────────────────────────────────────────────────────────
 
-def get_session_id(phone_number: str) -> str | None:
+def get_active_session(phone_number: str) -> dict | None:
+    """Return {session_id, updated_at} for the active session, or None."""
     row = get_db().execute(
-        "SELECT session_id FROM sessions WHERE phone_number = ?", (phone_number,)
+        """SELECT session_id, updated_at FROM sessions
+           WHERE phone_number = ? AND is_active = 1
+           ORDER BY updated_at DESC LIMIT 1""",
+        (phone_number,),
     ).fetchone()
-    return row["session_id"] if row else None
+    return dict(row) if row else None
 
 
-def save_session_id(phone_number: str, session_id: str) -> None:
+def save_session(phone_number: str, session_id: str, preview: str | None = None) -> None:
+    """
+    Track a session after each successful agent run.
+
+    - If the session_id is new: deactivate the current active session and insert
+      this one as active. The preview (first user message) is saved for the menu.
+    - If it already exists: just refresh updated_at (preview stays as-is).
+    """
+    db = get_db()
+    existing = db.execute(
+        "SELECT id FROM sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+
+    if existing:
+        db.execute(
+            "UPDATE sessions SET updated_at = datetime('now') WHERE session_id = ?",
+            (session_id,),
+        )
+    else:
+        # Deactivate whatever was active before
+        db.execute(
+            "UPDATE sessions SET is_active = 0 WHERE phone_number = ? AND is_active = 1",
+            (phone_number,),
+        )
+        db.execute(
+            """INSERT INTO sessions (phone_number, session_id, is_active, preview)
+               VALUES (?, ?, 1, ?)""",
+            (phone_number, session_id, preview),
+        )
+    db.commit()
+
+
+def deactivate_current_session(phone_number: str) -> None:
+    """Mark the active session inactive (reset). The row is kept for future resume."""
     db = get_db()
     db.execute(
-        """INSERT INTO sessions (phone_number, session_id, updated_at)
-           VALUES (?, ?, datetime('now'))
-           ON CONFLICT(phone_number) DO UPDATE SET
-               session_id = excluded.session_id,
-               updated_at = excluded.updated_at""",
-        (phone_number, session_id),
+        "UPDATE sessions SET is_active = 0 WHERE phone_number = ? AND is_active = 1",
+        (phone_number,),
+    )
+    db.commit()
+
+
+def list_past_sessions(phone_number: str, limit: int = 5) -> list[dict]:
+    """Return recent inactive sessions for the resume menu, newest first."""
+    rows = get_db().execute(
+        """SELECT session_id, preview, updated_at FROM sessions
+           WHERE phone_number = ? AND is_active = 0
+           ORDER BY updated_at DESC LIMIT ?""",
+        (phone_number, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_active_session(phone_number: str, session_id: str) -> None:
+    """Deactivate all sessions for this user, then mark the chosen one active."""
+    db = get_db()
+    db.execute(
+        "UPDATE sessions SET is_active = 0 WHERE phone_number = ?",
+        (phone_number,),
+    )
+    db.execute(
+        "UPDATE sessions SET is_active = 1, updated_at = datetime('now') WHERE session_id = ?",
+        (session_id,),
     )
     db.commit()

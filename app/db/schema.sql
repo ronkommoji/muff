@@ -36,11 +36,19 @@ CREATE TABLE IF NOT EXISTS kv (
     value TEXT
 );
 
+-- v2: one row per session so users can list and resume past sessions
 CREATE TABLE IF NOT EXISTS sessions (
-    phone_number TEXT PRIMARY KEY,
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone_number TEXT NOT NULL,
     session_id   TEXT NOT NULL,
+    is_active    INTEGER NOT NULL DEFAULT 1,
+    preview      TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sid   ON sessions(session_id);
+CREATE INDEX        IF NOT EXISTS idx_sessions_phone ON sessions(phone_number, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS logs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
