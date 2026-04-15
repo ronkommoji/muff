@@ -2,9 +2,11 @@
 Dashboard API routes — read-only views of messages, memories, and tools.
 Also exposes a POST endpoint to kick off Composio OAuth flows.
 """
+import asyncio
 import base64
+import json
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from app.db.database import get_all_messages, get_recent_tool_calls, get_usage_summary
 from app.services.supermemory import search_memories, list_memories
 from app.services import composio as composio_svc
@@ -99,6 +101,37 @@ async def get_tools(request: Request):
     except Exception as e:
         return JSONResponse(status_code=200, content={"tools": [], "error": str(e)})
     return {"tools": apps}
+
+
+@router.get("/stream")
+async def sse_stream(request: Request):
+    """
+    Server-Sent Events endpoint for the dashboard real-time updates.
+    Pushes messages, tool calls, and usage data every 3 seconds.
+    The browser reconnects automatically if the connection drops.
+    """
+    _check_auth(request)
+
+    async def event_generator():
+        while True:
+            if await request.is_disconnected():
+                break
+            snapshot = {
+                "messages": get_all_messages(limit=100),
+                "tool_calls": get_recent_tool_calls(limit=50),
+                "usage": get_usage_summary(),
+            }
+            yield f"data: {json.dumps(snapshot)}\n\n"
+            await asyncio.sleep(3)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx/Fly.io proxy buffering
+        },
+    )
 
 
 @router.post("/tools/{app}/authorize")
