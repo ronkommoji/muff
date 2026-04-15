@@ -49,3 +49,15 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sid   ON sessions(session_id);
 CREATE INDEX        IF NOT EXISTS idx_sessions_phone ON sessions(phone_number, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    level       TEXT NOT NULL CHECK(level IN ('info', 'warning', 'error')),
+    event_type  TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    metadata    TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level, created_at DESC);

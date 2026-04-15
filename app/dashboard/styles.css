@@ -375,3 +375,152 @@ pre {
   line-height: 1;
   margin-left: 0.5rem;
 }
+
+/* ── Auto-refresh toggle ───────────────────────────── */
+.auto-refresh-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.auto-refresh-toggle input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ── Tab count badges ───────────────────────────────── */
+.tab-count {
+  font-size: 10px;
+  background: #222;
+  color: var(--muted);
+  border-radius: 10px;
+  padding: 0.05rem 0.4rem;
+  margin-left: 0.25rem;
+  vertical-align: middle;
+}
+
+/* ── Charts ─────────────────────────────────────────── */
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 1rem;
+}
+
+.chart-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+.chart-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ── Memory Graph ───────────────────────────────────── */
+.graph-legend {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.graph-legend-item {
+  font-size: 10px;
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  border: 1px solid;
+  color: var(--muted);
+  text-transform: capitalize;
+}
+
+/* ── Log entries ────────────────────────────────────── */
+.badge-info    { background: #132030; color: #4f8ef7; }
+.badge-warning { background: #2e2010; color: #f7b84f; }
+.badge-error   { background: #2e1010; color: #f75555; }
+
+.log-entry { border-left: 3px solid var(--border); }
+.log-error   { border-left-color: var(--red); }
+.log-warning { border-left-color: #f7b84f; }
+.log-info    { border-left-color: var(--accent); }
+
+.log-event-type {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: monospace;
+}
+
+/* ── Database viewer ────────────────────────────────── */
+.db-schema-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.55rem 0.85rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  margin-bottom: 0.75rem;
+}
+
+.db-col-badge {
+  background: #111;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+  font-size: 11px;
+  font-family: monospace;
+}
+
+.db-table-wrapper {
+  overflow-x: auto;
+}
+
+.db-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.db-table th {
+  background: #111;
+  color: var(--muted);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  white-space: nowrap;
+}
+
+.db-table td {
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid #1f1f1f;
+  color: var(--text);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+}
+
+.db-table tr:hover td { background: #1f1f1f; }
+
+.db-pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  justify-content: center;
+}
