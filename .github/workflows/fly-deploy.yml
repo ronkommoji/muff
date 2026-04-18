@@ -13,6 +13,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
+      # Secret must be a *repository* secret named exactly FLY_API_TOKEN (repo Settings → Secrets and variables → Actions).
+      - name: Verify FLY_API_TOKEN is configured
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "::error::FLY_API_TOKEN is empty. Add a repository secret named FLY_API_TOKEN (Settings → Secrets and variables → Actions). Org secrets must be granted to this repo."
+            exit 1
+          fi
+      - name: Deploy to Fly
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only
