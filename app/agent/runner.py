@@ -62,6 +62,7 @@ where they work/study, birth year, close relationships); \
 false for preferences, habits, opinions, or decisions that may evolve
 
 STRICT rules — violating these is worse than missing a fact:
+- Output ONLY the raw JSON array — no markdown, no code fences (no ```), no text before or after the array
 - NEVER extract calendar events, meetings, scheduled items, or anything from a calendar listing
 - NEVER extract email contents, email subjects, sender names, or anything from email results
 - NEVER extract results returned by any tool — those are task outputs, not personal facts
@@ -85,6 +86,141 @@ Assistant reply: {assistant_reply}
 # Truncate assistant reply fed to Haiku — tool results (calendar, email) can be
 # very long and confuse the model into extracting tool output as personal facts.
 _REPLY_TRUNCATE = 600
+
+# Reject markdown/JSON artifacts and other junk the model sometimes emits.
+_JUNK_FACTS = frozenset(
+    {
+        "]",
+        "[",
+        "}",
+        "{",
+        "```",
+        "```json",
+        "```JSON",
+        "null",
+        "true",
+        "false",
+    }
+)
+
+
+def _strip_markdown_code_fences(text: str) -> str:
+    """Remove ``` / ```json fences so json.loads can succeed."""
+    s = text.strip()
+    if not s.startswith("```"):
+        return s
+    first_nl = s.find("\n")
+    if first_nl == -1:
+        return s
+    s = s[first_nl + 1 :]
+    if s.rstrip().endswith("```"):
+        s = s.rstrip()[:-3].rstrip()
+    return s.strip()
+
+
+def _extract_top_level_json_array(text: str) -> str | None:
+    """Find a balanced [...] slice starting at the first '['."""
+    start = text.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    quote: str | None = None
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                in_string = False
+                quote = None
+            continue
+        if ch in "\"'":
+            in_string = True
+            quote = ch
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _is_valid_memory_fact(fact: str) -> bool:
+    """Filter garbage facts (markdown shards, JSON punctuation, etc.)."""
+    fact = fact.strip()
+    if len(fact) < 10:
+        return False
+    if fact in _JUNK_FACTS or fact.lower() in _JUNK_FACTS:
+        return False
+    if fact.startswith("```"):
+        return False
+    words = fact.split()
+    if len(words) < 2:
+        return False
+    if not any(c.isalpha() for c in fact):
+        return False
+    # Mostly punctuation / brackets — not a natural-language fact
+    alnum = sum(1 for c in fact if c.isalnum())
+    if alnum < len(fact) * 0.25:
+        return False
+    letters = sum(1 for c in fact if c.isalpha())
+    if letters < 8:
+        return False
+    return True
+
+
+def _parse_memory_extraction_response(text: str) -> list[tuple[str, bool]]:
+    """
+    Parse Haiku output into (fact, is_static) pairs.
+    Handles fenced JSON; never treats markdown lines as facts unless they pass validation.
+    """
+    raw = text.strip()
+    if not raw or raw.upper() == "NOTHING":
+        return []
+
+    cleaned = _strip_markdown_code_fences(raw)
+    to_parse = cleaned
+    try:
+        json.loads(to_parse)
+    except json.JSONDecodeError:
+        extracted = _extract_top_level_json_array(cleaned)
+        if extracted:
+            to_parse = extracted
+
+    items: list[dict] | None = None
+    try:
+        parsed = json.loads(to_parse)
+        if isinstance(parsed, list):
+            items = [x for x in parsed if isinstance(x, dict)]
+    except (json.JSONDecodeError, TypeError):
+        items = None
+
+    if items is not None:
+        out: list[tuple[str, bool]] = []
+        for item in items:
+            fact = item.get("fact")
+            if not isinstance(fact, str) or not fact.strip():
+                continue
+            if not _is_valid_memory_fact(fact):
+                continue
+            out.append((fact.strip(), bool(item.get("is_static", False))))
+        return out
+
+    # Last resort: plain lines (only if they look like real sentences, not fence shards)
+    facts: list[tuple[str, bool]] = []
+    for line in raw.splitlines():
+        line = line.strip().strip("- ").strip()
+        if not line or line.upper() == "NOTHING":
+            continue
+        if _is_valid_memory_fact(line):
+            facts.append((line, False))
+    return facts
 
 # ── Subagent definitions ──────────────────────────────────────────────────────
 
@@ -179,23 +315,7 @@ async def maybe_save_memory(user_msg: str, assistant_reply: str, parent_message_
             )
 
         text = response.content[0].text.strip() if response.content else "NOTHING"
-        if text == "NOTHING":
-            return
-
-        # Parse structured JSON output; fall back to plain lines if malformed
-        try:
-            items = json.loads(text)
-            facts = [
-                (item["fact"], bool(item.get("is_static", False)))
-                for item in items
-                if isinstance(item, dict) and item.get("fact")
-            ]
-        except (json.JSONDecodeError, TypeError, KeyError):
-            facts = [
-                (line.strip("- ").strip(), False)
-                for line in text.splitlines()
-                if line.strip() and line.strip() != "NOTHING"
-            ]
+        facts = _parse_memory_extraction_response(text)
 
         # Hard cap — never store more than 3 facts per exchange
         facts = facts[:3]
